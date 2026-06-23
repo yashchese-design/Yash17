@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Phishing Website Detector — Prototype</title>
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial; max-width:900px; margin:24px auto; color:#111; padding:0 16px; }
+    h1 { margin-bottom: 8px; }
+    .card { background:#fff; border:1px solid #e6e6e6; padding:16px; border-radius:8px; box-shadow:0 2px 6px rgba(20,20,20,0.03); }
+    label { display:block; margin-bottom:8px; font-weight:600; }
+    input[type="url"] { width:100%; padding:10px 12px; font-size:16px; border-radius:6px; border:1px solid #ccc; }
+    button { padding:10px 14px; font-size:15px; border-radius:6px; border:0; background:#0366d6; color:white; cursor:pointer; }
+    .results { margin-top:16px; }
+    .risk { font-weight:700; padding:10px; border-radius:6px; display:inline-block; color:white; }
+    .low { background:#16a34a; }
+    .medium { background:#f59e0b; }
+    .high { background:#dc2626; }
+    ul { margin:12px 0 0 20px; }
+    .muted { color:#666; font-size:14px; margin-top:8px; }
+    .rule { margin:8px 0; padding:10px; border-radius:6px; background:#fafafa; border:1px solid #f0f0f0; }
+    .open-btn { margin-left:8px; background:#10b981; }
+    footer { margin-top:28px; color:#666; font-size:13px; }
+    .copy { margin-left:8px; background:#6b7280; }
+  </style>
+</head>
+<body>
+  <h1>Phishing Website Detector (prototype)</h1>
+  <div class="card">
+    <label for="url">Enter URL to analyze</label>
+    <input id="url" type="url" placeholder="https://example.com/login" value="">
+    <div style="margin-top:12px">
+      <button id="checkBtn">Analyze URL</button>
+      <button id="openBtn" class="open-btn" style="display:none">Open URL</button>
+      <button id="copyBtn" class="copy" style="display:none">Copy URL</button>
+    </div>
+
+    <div class="results" id="results" style="display:none">
+      <div id="scoreRow" style="margin-top:16px">
+        Risk: <span id="riskLabel" class="risk">—</span> <span id="scoreText" style="margin-left:8px; font-weight:600;"></span>
+      </div>
+      <div id="explanation" class="muted"></div>
+
+      <div id="rulesList" style="margin-top:12px"></div>
+
+    </div>
+    <div id="note" class="muted" style="margin-top:10px">
+      This is a heuristic prototype (client-side only). See limitations below.
+    </div>
+  </div>
+
+  <footer>
+    Next steps: server-side WHOIS/age, SSL cert checks, page-content analysis (requires CORS/proxy), and ML model trained on labeled datasets (PhishTank / legitimate URLs).
+  </footer>
+
+  <script>
+    const suspiciousKeywords = [
+      "login","signin","bank","secure","account","verify","update","confirm","webscr","ebayisapi","paypal","appleid",
+      "ssn","socialsecurity","confirm","security","payment","verify"
+    ];
+
+    function isIpHost(host) {
+      // IPv4 or IPv4:port
+      return /^(\d{1,3}\.){3}\d{1,3}(:\d+)?$/.test(host);
+    }
+
+    function countSubdomains(host) {
+      // crude: count segments
+      const parts = host.split('.');
+      if (parts.length <= 2) return 0;
+      return parts.length - 2;
+    }
+
+    function hasPunycode(host) {
+      return host.startsWith("xn--");
+    }
+
+    function analyze(urlStr) {
+      const result = { score: 0, triggered: [] };
+      let u;
+      try {
+        u = new URL(urlStr);
+      } catch (e) {
+        result.triggered.push({ rule: 'invalid_url', message: 'The URL could not be parsed.' });
+        return result;
+      }
+
+      const host = u.hostname.toLowerCase();
+      const path = u.pathname || "";
+      const query = u.search || "";
+
+      // Rule: contains @
+      if (urlStr.includes('@')) {
+        result.score += 3;
+        result.triggered.push({ rule: 'has_at', message: "URL contains '@' — often used to obscure the real host." });
+      }
+
+      // Rule: IP address host
+      if (isIpHost(host)) {
+        result.score += 3;
+        result.triggered.push({ rule: 'ip_host', message: "Host is an IP address — phishing pages sometimes use raw IPs." });
+      }
+
+      // Rule: punycode / IDN trick
+      if (host.split('.').some(part => part.startsWith('xn--'))) {
+        result.score += 3;
+        result.triggered.push({ rule: 'punycode', message: "Uses punycode / IDN (xn--) — possible homograph attack." });
+      }
+
+      // Rule: long URL
+      if (urlStr.length > 75) {
+        result.score += 1;
+        result.triggered.push({ rule: 'long_url', message: `URL length is ${urlStr.length} characters (long URLs can be suspicious).` });
+      }
+
+      // Rule: many subdomains
+      const subCount = countSubdomains(host);
+      if (subCount >= 2) {
+        result.score += 1;
+        result.triggered.push({ rule: 'many_subdomains', message: `Host has ${subCount} subdomain segment(s). Excessive subdomains can hide the real domain.` });
+      }
+
+      // Rule: hyphen in domain
+      if (host.split('.')[host.split('.').length-2].includes('-')) {
+        result.score += 1;
+        result.triggered.push({ rule: 'hyphen_in_domain', message: "Domain contains a hyphen — attackers sometimes register lookalike domains." });
+      }
+
+      // Rule: http vs https
+      if (u.protocol !== 'https:') {
+        result.score += 1;
+        result.triggered.push({ rule: 'no_https', message: "Page is not HTTPS — lack of TLS is suspicious for pages requesting credentials." });
+      }
+
+      // Rule: suspicious keywords
+      const lower = urlStr.toLowerCase();
+      const foundKeywords = suspiciousKeywords.filter(k => lower.includes(k));
+      if (foundKeywords.length > 0) {
+        const add = Math.min(3, Math.ceil(foundKeywords.length / 2));
+        result.score += add;
+        result.triggered.push({ rule: 'suspicious_keywords', message: `Suspicious keywords found: ${foundKeywords.slice(0,6).join(', ')}.` });
+      }
+
+      // Rule: long query or long path
+      if (path.length > 100) {
+        result.score += 1;
+        result.triggered.push({ rule: 'long_path', message: `Path is long (${path.length} chars).` });
+      }
+      if (query.length > 50) {
+        result.score += 1;
+        result.triggered.push({ rule: 'long_query', message: `Query string is long (${query.length} chars).` });
+      }
+
+      // Rule: suspicious punctuation or many dots
+      const dotCount = host.split('.').length - 1;
+      if (dotCount >= 4) {
+        result.score += 1;
+        result.triggered.push({ rule: 'many_dots', message: `Host has many dots (${dotCount}).` });
+      }
+
+      // Low-level heuristic: known brand in subdomain (e.g., paypal.xyz.example.com)
+      // If hostname contains a well-known brand but the registered domain (2LD) does not match, that's suspicious.
+      const brands = ["paypal","apple","google","microsoft","bank","amazon","facebook","stripe"];
+      const hostParts = host.split('.');
+      const registeredCandidate = hostParts.slice(-2).join('.'); // crude 2LD
+      for (const b of brands) {
+        if (host.includes(b) && !registeredCandidate.includes(b)) {
+          result.score += 2;
+          result.triggered.push({ rule: 'brand_mismatch', message: `Brand keyword "${b}" appears in the hostname but not in the top-level domain part (${registeredCandidate}). Could be impersonation.` });
+          break;
+        }
+      }
+
+      // final note: clamp score
+      if (result.score < 0) result.score = 0;
+      return result;
+    }
+
+    function verdict(score) {
+      if (score <= 2) return { label: 'Low', className: 'low', text: 'Low risk' };
+      if (score <= 5) return { label: 'Medium', className: 'medium', text: 'Medium risk — be cautious' };
+      return { label: 'High', className: 'high', text: 'High risk — likely phishing' };
+    }
+
+    document.getElementById('checkBtn').addEventListener('click', () => {
+      const url = document.getElementById('url').value.trim();
+      const resultsEl = document.getElementById('results');
+      const rulesList = document.getElementById('rulesList');
+      const explanation = document.getElementById('explanation');
+      const scoreText = document.getElementById('scoreText');
+      const riskLabel = document.getElementById('riskLabel');
+      const openBtn = document.getElementById('openBtn');
+      const copyBtn = document.getElementById('copyBtn');
+
+      if (!url) { alert('Please enter a URL.'); return; }
+      const res = analyze(url);
+      const v = verdict(res.score);
+
+      riskLabel.textContent = v.label;
+      riskLabel.className = 'risk ' + v.className;
+      scoreText.textContent = `${res.score} pts — ${v.text}`;
+
+      rulesList.innerHTML = '';
+      if (res.triggered.length === 0) {
+        rulesList.innerHTML = '<div class="rule">No heuristic warnings detected. That does not guarantee safety.</div>';
+      } else {
+        res.triggered.forEach(r => {
+          const div = document.createElement('div');
+          div.className = 'rule';
+          div.innerHTML = `<strong>${r.message}</strong><div class="muted" style="margin-top:6px">Rule: ${r.rule}</div>`;
+          rulesList.appendChild(div);
+        });
+      }
+
+      explanation.textContent = "Heuristic checks run on the URL only. This is not a definitive verdict — combine with WHOIS/SSL checks, content analysis, and ML models for production use.";
+      resultsEl.style.display = 'block';
+      openBtn.style.display = 'inline-block';
+      copyBtn.style.display = 'inline-block';
+
+      openBtn.onclick = () => {
+        // open in new tab; warn user
+        if (v.label === 'High' && !confirm('This URL is flagged as High risk. Open anyway?')) return;
+        window.open(url, '_blank', 'noopener');
+      };
+      copyBtn.onclick = () => {
+        navigator.clipboard?.writeText(url).then(()=> alert('Copied URL to clipboard.'));
+      };
+    });
+
+    // allow Enter key
+    document.getElementById('url').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        document.getElementById('checkBtn').click();
+      }
+    });
+  </script>
+</body>
+    </html>
